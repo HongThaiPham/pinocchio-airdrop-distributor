@@ -5,10 +5,11 @@ pub mod errors;
 pub mod instructions;
 pub mod processor;
 pub mod states;
+pub mod utils;
 
 use processor::process_instruction;
 
-pinocchio_pubkey::declare_id!("22222222222222222222222222222222222222222222");
+pinocchio_pubkey::declare_id!("FoNu94ZtecyvwuJ1BvKXkmpbGFaiZ5TCcpe9yXdcQbr2");
 
 program_entrypoint!(process_instruction);
 no_allocator!();
