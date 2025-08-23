@@ -13,4 +13,4 @@ pinocchio_pubkey::declare_id!("FoNu94ZtecyvwuJ1BvKXkmpbGFaiZ5TCcpe9yXdcQbr2");
 
 program_entrypoint!(process_instruction);
 no_allocator!();
-nostd_panic_handler!();
+// nostd_panic_handler!();

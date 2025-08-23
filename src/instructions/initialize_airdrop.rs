@@ -4,7 +4,6 @@ use pinocchio::{
     account_info::AccountInfo,
     instruction::{Seed, Signer},
     program_error::ProgramError,
-    pubkey::find_program_address,
     sysvars::{rent::Rent, Sysvar},
     ProgramResult,
 };
