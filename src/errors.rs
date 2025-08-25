@@ -4,6 +4,7 @@ use pinocchio::program_error::ProgramError;
 pub enum AirdropProgramError {
     InvalidProof,
     Unauthorized,
+    AccountAlreadyClaimed,
 }
 
 impl From<AirdropProgramError> for ProgramError {

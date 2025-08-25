@@ -1,10 +1,16 @@
 use core::mem::transmute;
 
-use pinocchio::{account_info::AccountInfo, program_error::ProgramError, ProgramResult};
+use pinocchio::{
+    account_info::AccountInfo,
+    instruction::{Seed, Signer},
+    program_error::ProgramError,
+    sysvars::{rent::Rent, Sysvar},
+    ProgramResult,
+};
 
 use crate::{
     errors::AirdropProgramError,
-    states::AirdropState,
+    states::{AirdropState, ClaimStatus},
     utils::{
         create_airdrop_leaf, load_acc_mut_unchecked, load_acc_unchecked, verify_merkle_proof,
         DataLen,
@@ -14,13 +20,14 @@ use crate::{
 pub struct ClaimAirdropAccounts<'info> {
     pub airdrop_state: &'info AccountInfo,
     pub signer: &'info AccountInfo,
+    pub user_claim: &'info AccountInfo,
 }
 
 impl<'info> TryFrom<&'info [AccountInfo]> for ClaimAirdropAccounts<'info> {
     type Error = ProgramError;
 
     fn try_from(accounts: &'info [AccountInfo]) -> Result<Self, Self::Error> {
-        let [airdrop_state, signer, _] = accounts else {
+        let [airdrop_state, signer, user_claim, _] = accounts else {
             return Err(ProgramError::NotEnoughAccountKeys);
         };
 
@@ -29,9 +36,17 @@ impl<'info> TryFrom<&'info [AccountInfo]> for ClaimAirdropAccounts<'info> {
             return Err(ProgramError::InvalidAccountData);
         }
 
+        if !user_claim.is_writable() {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if !user_claim.data_is_empty() {
+            return Err(AirdropProgramError::AccountAlreadyClaimed.into());
+        }
+
         Ok(ClaimAirdropAccounts {
             airdrop_state,
             signer,
+            user_claim,
         })
     }
 }
@@ -40,6 +55,7 @@ impl<'info> TryFrom<&'info [AccountInfo]> for ClaimAirdropAccounts<'info> {
 pub struct ClaimAirdropInstructionData {
     pub amount: u64,
     pub leaf_index: u64,
+    pub bump: u8,
     pub proof_len: u8,
 }
 
@@ -142,6 +158,40 @@ impl<'info> ClaimAirdrop<'info> {
 
         if !is_valid {
             return Err(AirdropProgramError::InvalidProof.into());
+        }
+
+        ClaimStatus::validate_pda(
+            self.accounts.user_claim.key(),
+            self.accounts.airdrop_state.key(),
+            self.accounts.signer.key(),
+            self.instruction_data.bump,
+        )?;
+
+        // // init user_claim to avoid double claims
+        {
+            let bump_binding = [self.instruction_data.bump];
+            let seed = [
+                Seed::from(ClaimStatus::SEED),
+                Seed::from(self.accounts.airdrop_state.key().as_ref()),
+                Seed::from(self.accounts.signer.key().as_ref()),
+                Seed::from(&bump_binding),
+            ];
+            let signer_seeds = Signer::from(&seed);
+
+            pinocchio_system::instructions::CreateAccount {
+                from: self.accounts.signer,
+                to: self.accounts.user_claim,
+                space: ClaimStatus::LEN as u64,
+                lamports: Rent::get()?.minimum_balance(ClaimStatus::LEN),
+                owner: &crate::ID,
+            }
+            .invoke_signed(&[signer_seeds])?;
+
+            let mut data: pinocchio::account_info::RefMut<'_, [u8]> =
+                self.accounts.user_claim.try_borrow_mut_data()?;
+            let user_claim = unsafe { load_acc_mut_unchecked::<ClaimStatus>(&mut data) }?;
+
+            user_claim.bump = [self.instruction_data.bump];
         }
 
         {
