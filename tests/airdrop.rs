@@ -5,10 +5,13 @@ mod tests_airdrop_distributor {
         Mollusk,
     };
     use pinocchio_airdrop_distributor::{
-        instructions::InitializeAirdropInstructionData, states::AirdropState, utils::to_bytes, *,
+        instructions::InitializeAirdropInstructionData,
+        states::AirdropState,
+        utils::{to_bytes, DataLen},
+        *,
     };
     use solana_sdk::{
-        account::Account,
+        account::{Account, ReadableAccount},
         instruction::{AccountMeta, Instruction},
         native_token::LAMPORTS_PER_SOL,
         pubkey::Pubkey,
@@ -180,12 +183,14 @@ mod tests_airdrop_distributor {
             Pubkey::find_program_address(&[AirdropState::SEED], &PROGRAM_ID);
 
         let airdrop_account = Account::new(0, 0, &system_program);
-
+        let amount = 100_000_000u64;
         let ix_data = InitializeAirdropInstructionData {
             merkle_root,
-            amount: 500u64,
+            amount,
             bump,
         };
+
+        let lamport_for_rent = mollusk.sysvars.rent.minimum_balance(AirdropState::LEN);
 
         let mut data = vec![0];
         data.extend_from_slice(unsafe { to_bytes(&ix_data) });
@@ -211,9 +216,17 @@ mod tests_airdrop_distributor {
                 &[
                     Check::success(),
                     Check::account(&airdrop_address).owner(&PROGRAM_ID).build(),
+                    Check::account(&airdrop_address)
+                        .lamports(amount + lamport_for_rent)
+                        .build(),
                 ],
             );
 
+        // check balance of aidrop_state
+
+        let airdrop_account = result.get_account(&airdrop_address).unwrap();
+        print!("{}", airdrop_account.lamports());
+        assert!(airdrop_account.lamports() >= amount);
         assert!(result.program_result == ProgramResult::Success);
     }
 

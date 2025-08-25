@@ -121,8 +121,18 @@ impl<'info> InitializeAirdrop<'info> {
             airdrop_state.merkle_root = self.instruction_data.merkle_root;
             airdrop_state.authority = *self.accounts.authority.key();
             airdrop_state.bump = [self.instruction_data.bump];
-            airdrop_state.airdrop_amount = 0u64.to_le_bytes();
+            airdrop_state.airdrop_amount = self.instruction_data.amount.to_le_bytes();
             airdrop_state.amount_claimed = 0u64.to_le_bytes();
+        }
+
+        {
+            // transfer sol to airdrop_state
+            pinocchio_system::instructions::Transfer {
+                from: self.accounts.authority,
+                to: self.accounts.airdrop_state,
+                lamports: self.instruction_data.amount,
+            }
+            .invoke()?;
         }
         Ok(())
     }
