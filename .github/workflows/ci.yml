@@ -2,13 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, github-actions-test]
   pull_request:
     branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
-  SOLANA_VERSION: '1.18.22'
+  SOLANA_VERSION: '2.1.0'
 
 jobs:
   build-and-test:
