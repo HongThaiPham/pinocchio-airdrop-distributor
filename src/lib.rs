@@ -1,6 +1,6 @@
 #![no_std]
 #![allow(unexpected_cfgs)]
-use pinocchio::{no_allocator, nostd_panic_handler, program_entrypoint};
+use pinocchio::{no_allocator, program_entrypoint};
 pub mod errors;
 pub mod instructions;
 pub mod processor;

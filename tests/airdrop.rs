@@ -4,16 +4,18 @@ mod tests_airdrop_distributor {
         result::{Check, ProgramResult},
         Mollusk,
     };
+
     use pinocchio_airdrop_distributor::{
-        instructions::InitializeAirdropInstructionData,
+        instructions::{ClaimAirdropInstructionData, InitializeAirdropInstructionData},
         states::AirdropState,
         utils::{to_bytes, DataLen},
         *,
     };
     use solana_sdk::{
-        account::{Account, ReadableAccount},
+        account::{Account, AccountSharedData, ReadableAccount},
         instruction::{AccountMeta, Instruction},
         native_token::LAMPORTS_PER_SOL,
+        program_error::ProgramError,
         pubkey::Pubkey,
     };
 
@@ -29,7 +31,7 @@ mod tests_airdrop_distributor {
         // Tạo leaves từ airdrop data
         let mut leaves: Vec<[u8; 32]> = airdrop_data
             .iter()
-            .map(|(pubkey, amount)| create_airdrop_leaf(&pubkey.to_bytes(), *amount))
+            .map(|(pubkey, amount)| create_airdrop_leaf(&pubkey.to_bytes(), *amount, 0))
             .collect();
 
         // Nếu chỉ có 1 leaf, return leaf đó làm root
@@ -69,7 +71,7 @@ mod tests_airdrop_distributor {
         // Tạo leaves
         let mut leaves: Vec<[u8; 32]> = airdrop_data
             .iter()
-            .map(|(pubkey, amount)| create_airdrop_leaf(&pubkey.to_bytes(), *amount))
+            .map(|(pubkey, amount)| create_airdrop_leaf(&pubkey.to_bytes(), *amount, 0))
             .collect();
 
         let mut proof = Vec::new();
@@ -139,11 +141,12 @@ mod tests_airdrop_distributor {
         let recipient = [42u8; 32];
         let amount = 1000u64;
 
-        let leaf1 = create_airdrop_leaf(&recipient, amount);
+        let leaf1 = create_airdrop_leaf(&recipient, amount, 0);
 
         let mut reference_input = Vec::new();
         reference_input.extend_from_slice(&recipient);
         reference_input.extend_from_slice(&amount.to_le_bytes());
+        reference_input.push(0u8); // is_claimed = 0
         let reference_leaf = keccak::hash(&reference_input);
 
         assert_eq!(leaf1, reference_leaf.to_bytes());
@@ -165,14 +168,6 @@ mod tests_airdrop_distributor {
     fn init_airdrop_state() {
         let mollusk = get_mollusk();
 
-        let airdrop_recipients = vec![
-            (Pubkey::new_unique(), 100_000_000u64),
-            (Pubkey::new_unique(), 200_000_000u64),
-            (Pubkey::new_unique(), 150_000_000u64),
-        ];
-
-        let merkle_root = create_merkle_root(&airdrop_recipients);
-
         let (system_program, system_account) =
             mollusk_svm::program::keyed_account_for_system_program();
 
@@ -183,7 +178,16 @@ mod tests_airdrop_distributor {
             Pubkey::find_program_address(&[AirdropState::SEED], &PROGRAM_ID);
 
         let airdrop_account = Account::new(0, 0, &system_program);
-        let amount = 100_000_000u64;
+
+        let airdrop_recipients = vec![
+            (Pubkey::new_unique(), 100_000_000u64),
+            (Pubkey::new_unique(), 200_000_000u64),
+            (Pubkey::new_unique(), 150_000_000u64),
+        ];
+        let merkle_root = create_merkle_root(&airdrop_recipients);
+
+        let amount = airdrop_recipients.iter().map(|(_, amt)| amt).sum();
+
         let ix_data = InitializeAirdropInstructionData {
             merkle_root,
             amount,
@@ -209,9 +213,9 @@ mod tests_airdrop_distributor {
             .process_and_validate_instruction(
                 &instruction,
                 &[
-                    (airdrop_address, airdrop_account.into()),
-                    (maker, maker_account.into()),
-                    (system_program, system_account.into()),
+                    (airdrop_address, airdrop_account.clone()),
+                    (maker, maker_account.clone()),
+                    (system_program, system_account.clone()),
                 ],
                 &[
                     Check::success(),
@@ -228,6 +232,183 @@ mod tests_airdrop_distributor {
         print!("{}", airdrop_account.lamports());
         assert!(airdrop_account.lamports() >= amount);
         assert!(result.program_result == ProgramResult::Success);
+    }
+
+    #[test]
+    fn claim_airdrop() {
+        let mollusk = get_mollusk();
+
+        let (system_program, system_account) =
+            mollusk_svm::program::keyed_account_for_system_program();
+
+        let maker = Pubkey::new_from_array([0x02; 32]);
+        let _maker_account = Account::new(1 * LAMPORTS_PER_SOL, 0, &system_program);
+
+        let claimer = Pubkey::new_from_array([0x03; 32]);
+        let claimer_account = Account::new(1 * LAMPORTS_PER_SOL, 0, &system_program);
+
+        let airdrop_recipients = vec![
+            (Pubkey::new_unique(), 100_000_000u64),
+            (Pubkey::new_unique(), 200_000_000u64),
+            (Pubkey::new_unique(), 150_000_000u64),
+            (claimer, 50_000_000u64),
+            (Pubkey::new_unique(), 75_000_000u64),
+            (Pubkey::new_unique(), 125_000_000u64),
+        ];
+        let merkle_root = create_merkle_root(&airdrop_recipients);
+        let amount: u64 = airdrop_recipients.iter().map(|(_, amt)| amt).sum();
+
+        let (airdrop_address, bump) =
+            Pubkey::find_program_address(&[AirdropState::SEED], &PROGRAM_ID);
+
+        let airdrop_account_data = AirdropState {
+            authority: maker.to_bytes(),
+            merkle_root,
+            airdrop_amount: amount.to_le_bytes(),
+            amount_claimed: 0u64.to_le_bytes(),
+            bump: [bump],
+        };
+        let lamport_for_rent = mollusk.sysvars.rent.minimum_balance(AirdropState::LEN);
+
+        let mut airdrop_account =
+            AccountSharedData::new(lamport_for_rent + amount, AirdropState::LEN, &PROGRAM_ID);
+
+        airdrop_account
+            .set_data_from_slice(unsafe { to_bytes::<AirdropState>(&airdrop_account_data) });
+
+        let leaf_index = 3;
+        let proof = create_merkle_proof(&airdrop_recipients, leaf_index as usize);
+
+        let ix_data = ClaimAirdropInstructionData {
+            amount: airdrop_recipients[leaf_index].1,
+            leaf_index: leaf_index as u64,
+            proof_len: proof.len() as u8,
+        };
+        let mut data = vec![1];
+        data.extend_from_slice(unsafe { to_bytes(&ix_data) });
+
+        // add proof to data
+        for proof_element in &proof {
+            data.extend_from_slice(proof_element);
+        }
+
+        let instruction = Instruction::new_with_bytes(
+            PROGRAM_ID,
+            &data,
+            vec![
+                AccountMeta::new(airdrop_address, false),
+                AccountMeta::new(claimer, true),
+                AccountMeta::new_readonly(system_program, false),
+            ],
+        );
+
+        let result: mollusk_svm::result::InstructionResult = mollusk
+            .process_and_validate_instruction(
+                &instruction,
+                &[
+                    (airdrop_address, airdrop_account.into()),
+                    (claimer, claimer_account.into()),
+                    (system_program, system_account.into()),
+                ],
+                &[
+                    Check::success(),
+                    Check::account(&airdrop_address).owner(&PROGRAM_ID).build(),
+                    Check::account(&airdrop_address)
+                        .lamports(amount + lamport_for_rent - airdrop_recipients[leaf_index].1)
+                        .build(),
+                    Check::account(&claimer)
+                        .lamports(1 * LAMPORTS_PER_SOL + airdrop_recipients[leaf_index].1)
+                        .build(),
+                ],
+            );
+        assert!(result.program_result == ProgramResult::Success);
+    }
+
+    #[test]
+    fn claim_airdrop_failt_with_invalid_proof() {
+        let mollusk = get_mollusk();
+
+        let (system_program, system_account) =
+            mollusk_svm::program::keyed_account_for_system_program();
+
+        let maker = Pubkey::new_from_array([0x02; 32]);
+        let _maker_account = Account::new(1 * LAMPORTS_PER_SOL, 0, &system_program);
+
+        let claimer = Pubkey::new_from_array([0x03; 32]);
+        let claimer_account = Account::new(1 * LAMPORTS_PER_SOL, 0, &system_program);
+
+        let airdrop_recipients = vec![
+            (Pubkey::new_unique(), 100_000_000u64),
+            (Pubkey::new_unique(), 200_000_000u64),
+            (Pubkey::new_unique(), 150_000_000u64),
+            (Pubkey::new_unique(), 50_000_000u64),
+            (Pubkey::new_unique(), 75_000_000u64),
+            (Pubkey::new_unique(), 125_000_000u64),
+        ];
+        let merkle_root = create_merkle_root(&airdrop_recipients);
+        let amount: u64 = airdrop_recipients.iter().map(|(_, amt)| amt).sum();
+
+        let (airdrop_address, bump) =
+            Pubkey::find_program_address(&[AirdropState::SEED], &PROGRAM_ID);
+
+        let airdrop_account_data = AirdropState {
+            authority: maker.to_bytes(),
+            merkle_root,
+            airdrop_amount: amount.to_le_bytes(),
+            amount_claimed: 0u64.to_le_bytes(),
+            bump: [bump],
+        };
+        let lamport_for_rent = mollusk.sysvars.rent.minimum_balance(AirdropState::LEN);
+
+        let mut airdrop_account =
+            AccountSharedData::new(lamport_for_rent + amount, AirdropState::LEN, &PROGRAM_ID);
+
+        airdrop_account
+            .set_data_from_slice(unsafe { to_bytes::<AirdropState>(&airdrop_account_data) });
+
+        let leaf_index = 3;
+        let proof = create_merkle_proof(&airdrop_recipients, leaf_index as usize);
+
+        let ix_data = ClaimAirdropInstructionData {
+            amount: airdrop_recipients[leaf_index].1,
+            leaf_index: leaf_index as u64,
+            proof_len: proof.len() as u8,
+        };
+        let mut data = vec![1];
+        data.extend_from_slice(unsafe { to_bytes(&ix_data) });
+
+        // add proof to data
+        for proof_element in &proof {
+            data.extend_from_slice(proof_element);
+        }
+
+        let instruction = Instruction::new_with_bytes(
+            PROGRAM_ID,
+            &data,
+            vec![
+                AccountMeta::new(airdrop_address, false),
+                AccountMeta::new(claimer, true),
+                AccountMeta::new_readonly(system_program, false),
+            ],
+        );
+
+        let result: mollusk_svm::result::InstructionResult = mollusk
+            .process_and_validate_instruction(
+                &instruction,
+                &[
+                    (airdrop_address, airdrop_account.into()),
+                    (claimer, claimer_account.into()),
+                    (system_program, system_account.into()),
+                ],
+                &[
+                    Check::err(ProgramError::Custom(0)), // invalid_proof
+                    Check::account(&airdrop_address).owner(&PROGRAM_ID).build(),
+                    Check::account(&airdrop_address)
+                        .lamports(amount + lamport_for_rent)
+                        .build(),
+                ],
+            );
+        assert!(result.program_result == ProgramResult::Failure(ProgramError::Custom(0)));
     }
 
     #[test]
@@ -254,12 +435,12 @@ mod tests_airdrop_distributor {
         let single_root = create_merkle_root(&single_recipient);
 
         let expected_leaf =
-            create_airdrop_leaf(&single_recipient[0].0.to_bytes(), single_recipient[0].1);
+            create_airdrop_leaf(&single_recipient[0].0.to_bytes(), single_recipient[0].1, 0);
         assert_eq!(single_root, expected_leaf);
 
         for (index, (pubkey, amount)) in airdrop_recipients.iter().enumerate() {
             let proof = create_merkle_proof(&airdrop_recipients, index);
-            let leaf = create_airdrop_leaf(&pubkey.to_bytes(), *amount);
+            let leaf = create_airdrop_leaf(&pubkey.to_bytes(), *amount, 0);
 
             // Verify proof
             let is_valid = verify_merkle_proof(&leaf, &proof, index as u64, &merkle_root);

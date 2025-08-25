@@ -76,9 +76,10 @@ pub fn verify_merkle_proof(
 
 /// Create a leaf hash from recipient address and amount
 #[inline(always)]
-pub fn create_airdrop_leaf(recipient: &[u8; 32], amount: u64) -> [u8; 32] {
-    let mut hash_input = [0u8; 40]; // 32 bytes for address + 8 bytes for amount
+pub fn create_airdrop_leaf(recipient: &[u8; 32], amount: u64, is_claimed: u8) -> [u8; 32] {
+    let mut hash_input = [0u8; 41]; // 32 bytes for address + 8 bytes for amount + 1 byte for is_claimed
     hash_input[..32].copy_from_slice(recipient);
-    hash_input[32..].copy_from_slice(&amount.to_le_bytes());
+    hash_input[32..40].copy_from_slice(&amount.to_le_bytes());
+    hash_input[40] = is_claimed;
     hash(&hash_input)
 }
