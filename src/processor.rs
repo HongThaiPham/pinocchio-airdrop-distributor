@@ -2,7 +2,7 @@ use pinocchio::{
     account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
 };
 
-use crate::instructions::{ClaimAirdrop, InitializeAirdrop};
+use crate::instructions::{ClaimAirdrop, InitializeAirdrop, UpdateMerkleRootAirdrop};
 
 pub fn process_instruction(
     _program_id: &Pubkey,
@@ -15,6 +15,9 @@ pub fn process_instruction(
         }
         Some((ClaimAirdrop::DISCRIMINATOR, data)) => {
             ClaimAirdrop::try_from((data, accounts))?.process()
+        }
+        Some((UpdateMerkleRootAirdrop::DISCRIMINATOR, data)) => {
+            UpdateMerkleRootAirdrop::try_from((data, accounts))?.process()
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }

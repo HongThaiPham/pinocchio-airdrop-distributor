@@ -2,7 +2,11 @@ use core::mem::transmute;
 
 use pinocchio::{account_info::AccountInfo, program_error::ProgramError, ProgramResult};
 
-use crate::utils::DataLen;
+use crate::{
+    errors::AirdropProgramError,
+    states::AirdropState,
+    utils::{load_acc_mut_unchecked, load_acc_unchecked, DataLen},
+};
 
 pub struct UpdateMerkleRootAccounts<'info> {
     pub airdrop_state: &'info AccountInfo,
@@ -18,11 +22,8 @@ impl<'info> TryFrom<&'info [AccountInfo]> for UpdateMerkleRootAccounts<'info> {
         };
 
         // verify airdrop_state
-        if !airdrop_state.is_writable() {
+        if !airdrop_state.is_writable() || airdrop_state.data_is_empty() {
             return Err(ProgramError::InvalidAccountData);
-        }
-        if !airdrop_state.data_is_empty() {
-            return Err(ProgramError::AccountAlreadyInitialized);
         }
 
         Ok(UpdateMerkleRootAccounts {
@@ -34,9 +35,8 @@ impl<'info> TryFrom<&'info [AccountInfo]> for UpdateMerkleRootAccounts<'info> {
 
 #[repr(C, packed)]
 pub struct UpdateMerkleRootInstructionData {
-    pub merkle_root: [u8; 32],
-    pub amount: u64,
-    pub bump: u8,
+    pub new_merkle_root: [u8; 32],
+    pub additional_amount: u64,
 }
 
 impl DataLen for UpdateMerkleRootInstructionData {
@@ -85,6 +85,44 @@ impl<'info> UpdateMerkleRootAirdrop<'info> {
     pub const DISCRIMINATOR: &'info u8 = &2;
 
     pub fn process(&mut self) -> ProgramResult {
+        {
+            let airdrop_state_data = unsafe {
+                load_acc_unchecked::<AirdropState>(
+                    &mut self.accounts.airdrop_state.borrow_data_unchecked(),
+                )?
+            };
+
+            if self
+                .accounts
+                .authority
+                .key()
+                .ne(&airdrop_state_data.authority)
+            {
+                return Err(AirdropProgramError::Unauthorized.into());
+            }
+        }
+
+        {
+            let data = unsafe { self.accounts.airdrop_state.borrow_mut_data_unchecked() };
+            let airdrop_state_data = unsafe { load_acc_mut_unchecked::<AirdropState>(data)? };
+
+            airdrop_state_data.merkle_root = self.instruction_data.new_merkle_root;
+
+            if self.instruction_data.additional_amount > 0 {
+                pinocchio_system::instructions::Transfer {
+                    from: self.accounts.authority,
+                    to: self.accounts.airdrop_state,
+                    lamports: self.instruction_data.additional_amount,
+                }
+                .invoke()?;
+
+                airdrop_state_data.airdrop_amount =
+                    u64::from_le_bytes(airdrop_state_data.airdrop_amount)
+                        .saturating_add(self.instruction_data.additional_amount)
+                        .to_le_bytes();
+            }
+        }
+
         Ok(())
     }
 }

@@ -6,7 +6,10 @@ mod tests_airdrop_distributor {
     };
 
     use pinocchio_airdrop_distributor::{
-        instructions::{ClaimAirdropInstructionData, InitializeAirdropInstructionData},
+        instructions::{
+            ClaimAirdropInstructionData, InitializeAirdropInstructionData,
+            UpdateMerkleRootInstructionData,
+        },
         states::{AirdropState, ClaimStatus},
         utils::{to_bytes, DataLen},
         *,
@@ -328,9 +331,12 @@ mod tests_airdrop_distributor {
                 &[
                     Check::success(),
                     Check::account(&airdrop_address).owner(&PROGRAM_ID).build(),
-                    // Check::account(&airdrop_address)
-                    //     .lamports(amount + lamport_for_rent - airdrop_recipients[leaf_index].1)
-                    //     .build(),
+                    Check::account(&user_claim_address)
+                        .owner(&PROGRAM_ID)
+                        .build(),
+                    Check::account(&airdrop_address)
+                        .lamports(amount + lamport_for_rent - airdrop_recipients[leaf_index].1)
+                        .build(),
                     // Check::account(&claimer)
                     //     .lamports(1 * LAMPORTS_PER_SOL + airdrop_recipients[leaf_index].1)
                     //     .build(),
@@ -544,6 +550,182 @@ mod tests_airdrop_distributor {
                 ],
             );
         assert!(result.program_result == ProgramResult::Failure(ProgramError::Custom(2)));
+    }
+
+    #[test]
+    fn update_merkle_tree_success() {
+        let mollusk = get_mollusk();
+
+        let (system_program, system_account) =
+            mollusk_svm::program::keyed_account_for_system_program();
+
+        let maker = Pubkey::new_from_array([0x02; 32]);
+        let maker_account = Account::new(1 * LAMPORTS_PER_SOL, 0, &system_program);
+
+        let old_airdrop_recipients = vec![
+            (Pubkey::new_unique(), 100_000_000u64),
+            (Pubkey::new_unique(), 200_000_000u64),
+            (Pubkey::new_unique(), 150_000_000u64),
+            (Pubkey::new_unique(), 75_000_000u64),
+            (Pubkey::new_unique(), 125_000_000u64),
+        ];
+        let old_merkle_root = create_merkle_root(&old_airdrop_recipients);
+        let old_amount: u64 = old_airdrop_recipients.iter().map(|(_, amt)| amt).sum();
+
+        let (airdrop_address, airdrop_account_bump) =
+            Pubkey::find_program_address(&[AirdropState::SEED], &PROGRAM_ID);
+
+        let airdrop_account_data = AirdropState {
+            authority: maker.to_bytes(),
+            merkle_root: old_merkle_root,
+            airdrop_amount: old_amount.to_le_bytes(),
+            amount_claimed: 0u64.to_le_bytes(),
+            bump: [airdrop_account_bump],
+        };
+        let lamport_for_rent = mollusk.sysvars.rent.minimum_balance(AirdropState::LEN);
+
+        let mut airdrop_account = AccountSharedData::new(
+            lamport_for_rent + old_amount,
+            AirdropState::LEN,
+            &PROGRAM_ID,
+        );
+
+        airdrop_account
+            .set_data_from_slice(unsafe { to_bytes::<AirdropState>(&airdrop_account_data) });
+
+        let new_airdrop_recipients = vec![
+            (Pubkey::new_unique(), 300_000_000u64),
+            (Pubkey::new_unique(), 20_000_000u64),
+            (Pubkey::new_unique(), 150_000_000u64),
+            (Pubkey::new_unique(), 720_000_000u64),
+            (Pubkey::new_unique(), 150_000_000u64),
+        ];
+        let new_merkle_root = create_merkle_root(&new_airdrop_recipients);
+        let new_amount: u64 = new_airdrop_recipients.iter().map(|(_, amt)| amt).sum();
+
+        let ix_data = UpdateMerkleRootInstructionData {
+            new_merkle_root,
+            additional_amount: new_amount - old_amount,
+        };
+
+        let mut data = vec![2];
+        data.extend_from_slice(unsafe { to_bytes(&ix_data) });
+
+        let instruction = Instruction::new_with_bytes(
+            PROGRAM_ID,
+            &data,
+            vec![
+                AccountMeta::new(airdrop_address, false),
+                AccountMeta::new(maker, true),
+                AccountMeta::new_readonly(system_program, false),
+            ],
+        );
+
+        let result: mollusk_svm::result::InstructionResult = mollusk
+            .process_and_validate_instruction(
+                &instruction,
+                &[
+                    (airdrop_address, airdrop_account.into()),
+                    (maker, maker_account.into()),
+                    (system_program, system_account.into()),
+                ],
+                &[
+                    Check::success(),
+                    Check::account(&airdrop_address).owner(&PROGRAM_ID).build(),
+                ],
+            );
+        assert!(result.program_result == ProgramResult::Success);
+    }
+
+    #[test]
+    fn update_merkle_tree_failure_with_unauthorized() {
+        let mollusk = get_mollusk();
+
+        let (system_program, system_account) =
+            mollusk_svm::program::keyed_account_for_system_program();
+
+        let maker = Pubkey::new_from_array([0x02; 32]);
+        let _maker_account = Account::new(1 * LAMPORTS_PER_SOL, 0, &system_program);
+
+        let old_airdrop_recipients = vec![
+            (Pubkey::new_unique(), 100_000_000u64),
+            (Pubkey::new_unique(), 200_000_000u64),
+            (Pubkey::new_unique(), 150_000_000u64),
+            (Pubkey::new_unique(), 75_000_000u64),
+            (Pubkey::new_unique(), 125_000_000u64),
+        ];
+        let old_merkle_root = create_merkle_root(&old_airdrop_recipients);
+        let old_amount: u64 = old_airdrop_recipients.iter().map(|(_, amt)| amt).sum();
+
+        let (airdrop_address, airdrop_account_bump) =
+            Pubkey::find_program_address(&[AirdropState::SEED], &PROGRAM_ID);
+
+        let airdrop_account_data = AirdropState {
+            authority: maker.to_bytes(),
+            merkle_root: old_merkle_root,
+            airdrop_amount: old_amount.to_le_bytes(),
+            amount_claimed: 0u64.to_le_bytes(),
+            bump: [airdrop_account_bump],
+        };
+        let lamport_for_rent = mollusk.sysvars.rent.minimum_balance(AirdropState::LEN);
+
+        let mut airdrop_account = AccountSharedData::new(
+            lamport_for_rent + old_amount,
+            AirdropState::LEN,
+            &PROGRAM_ID,
+        );
+
+        airdrop_account
+            .set_data_from_slice(unsafe { to_bytes::<AirdropState>(&airdrop_account_data) });
+
+        let new_airdrop_recipients = vec![
+            (Pubkey::new_unique(), 300_000_000u64),
+            (Pubkey::new_unique(), 20_000_000u64),
+            (Pubkey::new_unique(), 150_000_000u64),
+            (Pubkey::new_unique(), 720_000_000u64),
+            (Pubkey::new_unique(), 150_000_000u64),
+        ];
+        let new_merkle_root = create_merkle_root(&new_airdrop_recipients);
+        let new_amount: u64 = new_airdrop_recipients.iter().map(|(_, amt)| amt).sum();
+
+        let ix_data = UpdateMerkleRootInstructionData {
+            new_merkle_root,
+            additional_amount: new_amount - old_amount,
+        };
+
+        let mut data = vec![2];
+        data.extend_from_slice(unsafe { to_bytes(&ix_data) });
+
+        let fake_maker = Pubkey::new_from_array([0x05; 32]);
+        let fake_maker_account = Account::new(1 * LAMPORTS_PER_SOL, 0, &system_program);
+
+        let instruction = Instruction::new_with_bytes(
+            PROGRAM_ID,
+            &data,
+            vec![
+                AccountMeta::new(airdrop_address, false),
+                AccountMeta::new(fake_maker, true),
+                AccountMeta::new_readonly(system_program, false),
+            ],
+        );
+
+        let result: mollusk_svm::result::InstructionResult = mollusk
+            .process_and_validate_instruction(
+                &instruction,
+                &[
+                    (airdrop_address, airdrop_account.into()),
+                    (fake_maker, fake_maker_account.into()),
+                    (system_program, system_account.into()),
+                ],
+                &[
+                    Check::err(ProgramError::Custom(1)), // unauthorized
+                    Check::account(&airdrop_address).owner(&PROGRAM_ID).build(),
+                    Check::account(&airdrop_address)
+                        .data(unsafe { to_bytes::<AirdropState>(&airdrop_account_data) })
+                        .build(),
+                ],
+            );
+        assert!(result.program_result == ProgramResult::Failure(ProgramError::Custom(1)));
     }
 
     #[test]
